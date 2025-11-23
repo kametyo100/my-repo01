@@ -1,0 +1,341 @@
+diff --git a/reposition_stl.py b/reposition_stl.py
+index 8cebddf7cc69319cef3eba5864ebe31b1f3c0fb2..60300bd46b076ea2c7cbc0162a75f2d453c9251d 100644
+--- a/reposition_stl.py
++++ b/reposition_stl.py
+@@ -10,53 +10,53 @@ from pathlib import Path
+ from datetime import datetime
+ from mathutils import Vector, Matrix
+ import math
+ import re
+ 
+ # ------------------------------------------------------------
+ # 刻印パラメータ
+ # ------------------------------------------------------------
+ 
+ # -X 側（テキストA）
+ TEXT_A_Y_OFFSET = -6.0      # 平坦帯中心からのYオフセット(mm)
+ TEXT_A_Z_OFFSET = 8.0       # 底面(Z=0)からの高さ(mm)
+ 
+ # +X 側（テキストB）
+ TEXT_B_Y_OFFSET = 5.0       # 平坦帯中心からのYオフセット(mm)
+ TEXT_B_Z_OFFSET = 7.0       # 底面(Z=0)からの高さ(mm)
+ 
+ TEXT_HEIGHT_MM = 12.0       # 文字高さ（基準）
+ TEXT_DEPTH_MM  = 1.5        # 凹み深さ（Text extrude)
+ 
+ # 側壁平坦帯検出用
+ SIDE_SCAN_WIDTH   = 1.0     # 側壁から±1.0mm 以内の頂点だけを使用
+ FLAT_BINS_Y       = 24      # Y方向の分割数
+ MIN_VERTS_PER_BIN = 10      # 1ビンに最低何頂点あれば有効とみなすか
+ 
+-# 支持体メッシュ（グリッド平面）の分割
+-PLANE_SUBDIV_X = 24        # Z方向分割
+-PLANE_SUBDIV_Y = 12        # Y方向分割
++# 支持体メッシュ（グリッド平面）の分割（最小値）
++PLANE_SUBDIV_X = 24        # Z方向分割（高さ方向）
++PLANE_SUBDIV_Y = 12        # Y方向分割（文字幅方向）
+ 
+ # 支持体を側壁からどれだけ外側に置くか
+ SIDE_OUT_OFFSET = 2.0       # mm
+ 
+ # ------------------------------------------------------------
+ # ログユーティリティ
+ # ------------------------------------------------------------
+ 
+ def log(msg: str) -> None:
+     print(f"[INFO] {msg}")
+ 
+ def warn(msg: str) -> None:
+     print(f"[WARN] {msg}")
+ 
+ def error(msg: str) -> None:
+     print(f"[ERROR] {msg}", file=sys.stderr)
+ 
+ 
+ # ------------------------------------------------------------
+ # コマンドライン引数解析
+ #   blender -b -P reposition_stl.py -- --rot-angle=30 <dir1> <dir2> ...
+ # ------------------------------------------------------------
+ 
+ def parse_args():
+     argv = sys.argv
+@@ -323,111 +323,112 @@ def find_flat_band(obj, side: str):
+         if z_range < 0:
+             continue
+         if best_score is None or z_range < best_score:
+             best_score = z_range
+             best_idx   = i
+ 
+     if best_idx is None:
+         # 十分な頂点がない場合は側壁全体を使う
+         y_center = 0.5 * (min_y + max_y)
+         return {"y_min": min_y, "y_max": max_y, "y_center": y_center}
+ 
+     y_min_band = bin_min_y[best_idx]
+     y_max_band = bin_max_y[best_idx]
+     if y_min_band == float("inf") or y_max_band == float("-inf"):
+         y_min_band, y_max_band = min_y, max_y
+ 
+     y_center = 0.5 * (y_min_band + y_max_band)
+ 
+     return {"y_min": y_min_band, "y_max": y_max_band, "y_center": y_center}
+ 
+ 
+ # ------------------------------------------------------------
+ # 支持体グリッド平面の生成（Surface Deform ターゲット）
+ # ------------------------------------------------------------
+ 
+-def create_support_plane(base_obj, side: str, band: dict, bounds: dict, text_half_y: float, target_z: float):
++def create_support_plane(base_obj, side: str, band: dict, bounds: dict, text_half_y: float, target_z: float,
++                         subdiv_x: int, subdiv_y: int):
+     """
+     歯列側壁の前に、Y-Z 面に平行なグリッド平面を生成する。
+     この平面に Text を Surface Deform でバインドし、
+     平面を Shrinkwrap(Project) で曲面に沿わせて、文字を曲面に追従させる。
+     """
+ 
+     band_y_min   = band["y_min"]
+     band_y_max   = band["y_max"]
+     band_center  = band["y_center"]
+     band_height  = max(band_y_max - band_y_min, 1e-3)
+ 
+     # 支持体平面のY方向半径（文字の高さに余裕を持たせる）
+     plane_half_y = max(band_height * 0.6, text_half_y * 1.4)
+     # Z方向半径（上下方向。とりあえず文字高さを基準）
+     plane_half_z = max(TEXT_HEIGHT_MM * 0.7, 6.0)
+ 
+     # 側壁から少し外側へ
+     if side == "NEG_X":
+         x_pos = bounds["min_x"] - SIDE_OUT_OFFSET
+         rot_y = math.radians(90.0)   # 法線 -X向き
+     else:
+         x_pos = bounds["max_x"] + SIDE_OUT_OFFSET
+         rot_y = math.radians(-90.0)  # 法線 +X向き
+ 
+     # 支持体平面生成（Grid）
+-    bpy.ops.mesh.primitive_grid_add(
+-        x_subdivisions=PLANE_SUBDIV_X,
+-        y_subdivisions=PLANE_SUBDIV_Y,
++    bpy.ops.mesh.primitive_grid_add(
++        x_subdivisions=subdiv_x,
++        y_subdivisions=subdiv_y,
+         size=1.0,
+         location=(0.0, 0.0, 0.0)
+     )
+     plane = bpy.context.object
+ 
+     # XY平面 → YZ平面へ回転
+     plane.rotation_euler = (0.0, rot_y, 0.0)
+     bpy.context.view_layer.update()
+ 
+     # ローカル X → 世界Z, ローカルY → 世界Y になる前提でスケール
+     plane.scale = (plane_half_z, plane_half_y, 1.0)
+     bpy.context.view_layer.update()
+ 
+     # スケール・回転を適用
+     bpy.ops.object.select_all(action='DESELECT')
+     plane.select_set(True)
+     bpy.context.view_layer.objects.active = plane
+     bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+ 
+     # 位置合わせ（中心を band_center + offset, 指定Zへ）
+     plane.location = (x_pos, band_center, target_z)
+     bpy.context.view_layer.update()
+ 
+     return plane
+ 
+ 
+ # ------------------------------------------------------------
+ # Surface Deform + Shrinkwrap を用いて曲面に沿わせた刻印用メッシュを生成
+ # ------------------------------------------------------------
+ 
+-def create_surface_deform_text_cutter(base_obj, text_body: str, side: str, band: dict, bounds: dict,
+-                                      base_y_offset: float, base_z_offset: float):
++def create_surface_deform_text_cutter(base_obj, text_body: str, side: str, band: dict, bounds: dict,
++                                      base_y_offset: float, base_z_offset: float):
+     """
+     - Text を生成（文字の縦方向を Y軸に平行）
+     - 側壁の平坦帯と文字幅から Y位置を決める
+     - 支持体グリッド平面を生成
+     - Text を Mesh に変換し、Surface Deform で支持体平面にバインド
+     - 支持体平面を Shrinkwrap(Project) で歯列曲面に沿わせる
+     - Text の Surface Deform を適用して、曲面に沿った文字メッシュを返す
+     """
+     band_y_min = band["y_min"]
+     band_y_max = band["y_max"]
+     band_center = band["y_center"]
+     band_height = max(band_y_max - band_y_min, 1e-3)
+ 
+     # 1) Text 生成（原点）
+     bpy.ops.object.text_add(location=(0.0, 0.0, 0.0))
+     text_obj = bpy.context.object
+     text_obj.data.body    = text_body
+     text_obj.data.extrude = TEXT_DEPTH_MM
+ 
+     # 文字の縦(Z)を Y軸に揃えつつ、面法線を ±X へ
+     if side == "NEG_X":
+         text_obj.rotation_euler = (
+             math.radians(90.0),  # X回転
+             0.0,
+             math.radians(180.0)
+@@ -443,115 +444,143 @@ def create_surface_deform_text_cutter(base_obj, text_body: str, side: str, band:
+ 
+     # 高さを TEXT_HEIGHT_MM に揃える（dimensions.z を基準に）
+     cur_h = text_obj.dimensions.z
+     if cur_h > 0:
+         s = TEXT_HEIGHT_MM / cur_h
+         text_obj.scale = (s, s, s)
+         bpy.context.view_layer.update()
+ 
+     # 文字幅(世界Y方向)の半分
+     dims = text_obj.dimensions
+     text_half_y = 0.5 * dims.y
+ 
+     # 平坦帯の中に文字が収まるよう、Y位置を決定
+     margin = 0.2
+     low_limit  = band_y_min + text_half_y + margin
+     high_limit = band_y_max - text_half_y - margin
+ 
+     base_y = band_center + base_y_offset
+     if high_limit > low_limit:
+         target_y = max(low_limit, min(base_y, high_limit))
+     else:
+         target_y = base_y
+ 
+     target_z = base_z_offset
+ 
+-    # 支持体平面を生成（位置は band_center だが、Y方向に十分なサイズを持つ）
+-    support_plane = create_support_plane(
+-        base_obj,
+-        side=side,
+-        band=band,
+-        bounds=bounds,
+-        text_half_y=text_half_y,
+-        target_z=target_z
+-    )
++    # 支持体平面の分割数を文字サイズに応じて増やす
++    #   - Z方向: 1mm 前後のメッシュ密度を目安に最低 PLANE_SUBDIV_X を維持
++    #   - Y方向: 文字幅に合わせて面を細かくし、Surface Deform の追従性を向上
++    plane_subdiv_x = max(PLANE_SUBDIV_X, int(math.ceil((TEXT_HEIGHT_MM * 1.4) / 1.0)))
++    plane_subdiv_y = max(PLANE_SUBDIV_Y, int(math.ceil((text_half_y * 2.0) / 1.0)))
++
++    # 支持体平面を生成（位置は band_center だが、Y方向に十分なサイズを持つ）
++    support_plane = create_support_plane(
++        base_obj,
++        side=side,
++        band=band,
++        bounds=bounds,
++        text_half_y=text_half_y,
++        target_z=target_z,
++        subdiv_x=plane_subdiv_x,
++        subdiv_y=plane_subdiv_y
++    )
+ 
+     # Text を支持体平面上の適切な位置へ移動（X は支持体と合わせる）
+     if side == "NEG_X":
+         x_pos = bounds["min_x"] - SIDE_OUT_OFFSET
+     else:
+         x_pos = bounds["max_x"] + SIDE_OUT_OFFSET
+ 
+     text_obj.location = (x_pos, target_y, target_z)
+     bpy.context.view_layer.update()
+ 
+     # 2) Text を Mesh に変換
+     bpy.ops.object.select_all(action='DESELECT')
+     text_obj.select_set(True)
+     bpy.context.view_layer.objects.active = text_obj
+     bpy.ops.object.convert(target='MESH')
+     cutter_obj = bpy.context.object
+ 
+     bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+     bpy.context.view_layer.update()
+ 
+     # 3) Text に Surface Deform モディファイアを追加し、支持体にバインド
+     surf_mod = cutter_obj.modifiers.new(name="SurfDef", type='SURFACE_DEFORM')
+     surf_mod.target = support_plane
+ 
+     bpy.ops.object.select_all(action='DESELECT')
+     cutter_obj.select_set(True)
+     bpy.context.view_layer.objects.active = cutter_obj
+     bpy.ops.object.surfacedeform_bind(modifier=surf_mod.name)
+ 
+     # 4) 支持体平面に Shrinkwrap(Project) を追加して歯列に沿わせる
+-    shrink = support_plane.modifiers.new(name="SideWrap", type='SHRINKWRAP')
+-    shrink.target = base_obj
+-    shrink.wrap_method = 'PROJECT'
+-    shrink.use_project_x = True
+-    shrink.use_project_y = False
+-    shrink.use_project_z = False
++    shrink = support_plane.modifiers.new(name="SideWrap", type='SHRINKWRAP')
++    shrink.target = base_obj
++    shrink.wrap_method = 'PROJECT'
++    shrink.use_project_x = True
++    shrink.use_project_y = False
++    shrink.use_project_z = False
++    shrink.project_limit = SIDE_OUT_OFFSET + (TEXT_DEPTH_MM * 2.0)
+     if side == "NEG_X":
+         shrink.use_negative_direction = False
+         shrink.use_positive_direction = True   # +X 方向へ投影
+     else:
+         shrink.use_negative_direction = True   # -X 方向へ投影
+         shrink.use_positive_direction = False
+     shrink.offset = 0.0
+ 
+     bpy.ops.object.select_all(action='DESELECT')
+     support_plane.select_set(True)
+     bpy.context.view_layer.objects.active = support_plane
+     bpy.ops.object.modifier_apply(modifier=shrink.name)
+     bpy.context.view_layer.update()
+ 
+     # 5) Text側の Surface Deform を適用（曲面に沿った文字メッシュになる）
+     bpy.ops.object.select_all(action='DESELECT')
+     cutter_obj.select_set(True)
+     bpy.context.view_layer.objects.active = cutter_obj
+-    bpy.ops.object.modifier_apply(modifier=surf_mod.name)
+-    bpy.context.view_layer.update()
++    bpy.ops.object.modifier_apply(modifier=surf_mod.name)
++    bpy.context.view_layer.update()
++
++    # 6) Cutter 自体にも Shrinkwrap(Project) を追加して最終的に歯列曲面へ密着させる
++    cutter_wrap = cutter_obj.modifiers.new(name="CutterWrap", type='SHRINKWRAP')
++    cutter_wrap.target = base_obj
++    cutter_wrap.wrap_method = 'PROJECT'
++    cutter_wrap.use_project_x = True
++    cutter_wrap.use_project_y = False
++    cutter_wrap.use_project_z = False
++    cutter_wrap.project_limit = max(TEXT_DEPTH_MM * 2.0, SIDE_OUT_OFFSET + 1.0)
++    if side == "NEG_X":
++        cutter_wrap.use_negative_direction = False
++        cutter_wrap.use_positive_direction = True
++    else:
++        cutter_wrap.use_negative_direction = True
++        cutter_wrap.use_positive_direction = False
++    cutter_wrap.offset = 0.0  # 投影のみで原形を維持し、ベース形状を歪めない
++
++    bpy.ops.object.modifier_apply(modifier=cutter_wrap.name)
++    bpy.context.view_layer.update()
+ 
+     # 支持体平面は不要なので削除
+     bpy.data.objects.remove(support_plane, do_unlink=True)
+ 
+     return cutter_obj
+ 
+ 
+ # ------------------------------------------------------------
+ # ブーリアン適用
+ # ------------------------------------------------------------
+ 
+ def apply_boolean_engrave(target_obj, cutter_obj, label: str):
+     mod = target_obj.modifiers.new(name=f"Engrave_{label}", type='BOOLEAN')
+     mod.operation = 'DIFFERENCE'
+     mod.solver    = 'EXACT'
+     mod.object    = cutter_obj
+ 
+     bpy.ops.object.select_all(action='DESELECT')
+     target_obj.select_set(True)
+     bpy.context.view_layer.objects.active = target_obj
+     bpy.ops.object.modifier_apply(modifier=mod.name)
+ 
+     bpy.data.objects.remove(cutter_obj, do_unlink=True)
+ 
+ 

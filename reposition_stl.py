@@ -32,9 +32,9 @@ SIDE_SCAN_WIDTH   = 1.0     # 側壁から±1.0mm 以内の頂点だけを使用
 FLAT_BINS_Y       = 24      # Y方向の分割数
 MIN_VERTS_PER_BIN = 10      # 1ビンに最低何頂点あれば有効とみなすか
 
-# 支持体メッシュ（グリッド平面）の分割
-PLANE_SUBDIV_X = 24        # Z方向分割
-PLANE_SUBDIV_Y = 12        # Y方向分割
+# 支持体メッシュ（グリッド平面）の分割（最小値）
+PLANE_SUBDIV_X = 24        # Z方向分割（高さ方向）
+PLANE_SUBDIV_Y = 12        # Y方向分割（文字幅方向）
 
 # 支持体を側壁からどれだけ外側に置くか
 SIDE_OUT_OFFSET = 2.0       # mm
@@ -345,7 +345,8 @@ def find_flat_band(obj, side: str):
 # 支持体グリッド平面の生成（Surface Deform ターゲット）
 # ------------------------------------------------------------
 
-def create_support_plane(base_obj, side: str, band: dict, bounds: dict, text_half_y: float, target_z: float):
+def create_support_plane(base_obj, side: str, band: dict, bounds: dict, text_half_y: float, target_z: float,
+                         subdiv_x: int, subdiv_y: int):
     """
     歯列側壁の前に、Y-Z 面に平行なグリッド平面を生成する。
     この平面に Text を Surface Deform でバインドし、
@@ -372,8 +373,8 @@ def create_support_plane(base_obj, side: str, band: dict, bounds: dict, text_hal
 
     # 支持体平面生成（Grid）
     bpy.ops.mesh.primitive_grid_add(
-        x_subdivisions=PLANE_SUBDIV_X,
-        y_subdivisions=PLANE_SUBDIV_Y,
+        x_subdivisions=subdiv_x,
+        y_subdivisions=subdiv_y,
         size=1.0,
         location=(0.0, 0.0, 0.0)
     )
@@ -465,6 +466,12 @@ def create_surface_deform_text_cutter(base_obj, text_body: str, side: str, band:
 
     target_z = base_z_offset
 
+    # 支持体平面の分割数を文字サイズに応じて増やす
+    #   - Z方向: 1mm 前後のメッシュ密度を目安に最低 PLANE_SUBDIV_X を維持
+    #   - Y方向: 文字幅に合わせて面を細かくし、Surface Deform の追従性を向上
+    plane_subdiv_x = max(PLANE_SUBDIV_X, int(math.ceil((TEXT_HEIGHT_MM * 1.4) / 1.0)))
+    plane_subdiv_y = max(PLANE_SUBDIV_Y, int(math.ceil((text_half_y * 2.0) / 1.0)))
+
     # 支持体平面を生成（位置は band_center だが、Y方向に十分なサイズを持つ）
     support_plane = create_support_plane(
         base_obj,
@@ -472,7 +479,9 @@ def create_surface_deform_text_cutter(base_obj, text_body: str, side: str, band:
         band=band,
         bounds=bounds,
         text_half_y=text_half_y,
-        target_z=target_z
+        target_z=target_z,
+        subdiv_x=plane_subdiv_x,
+        subdiv_y=plane_subdiv_y
     )
 
     # Text を支持体平面上の適切な位置へ移動（X は支持体と合わせる）
@@ -529,6 +538,24 @@ def create_surface_deform_text_cutter(base_obj, text_body: str, side: str, band:
     cutter_obj.select_set(True)
     bpy.context.view_layer.objects.active = cutter_obj
     bpy.ops.object.modifier_apply(modifier=surf_mod.name)
+    bpy.context.view_layer.update()
+
+    # 6) Cutter 自体にも Shrinkwrap(Project) を追加して最終的に歯列曲面へ密着させる
+    cutter_wrap = cutter_obj.modifiers.new(name="CutterWrap", type='SHRINKWRAP')
+    cutter_wrap.target = base_obj
+    cutter_wrap.wrap_method = 'PROJECT'
+    cutter_wrap.use_project_x = True
+    cutter_wrap.use_project_y = False
+    cutter_wrap.use_project_z = False
+    if side == "NEG_X":
+        cutter_wrap.use_negative_direction = False
+        cutter_wrap.use_positive_direction = True
+    else:
+        cutter_wrap.use_negative_direction = True
+        cutter_wrap.use_positive_direction = False
+    cutter_wrap.offset = -0.05  # わずかに押し込み、ブーリアンを安定させる
+
+    bpy.ops.object.modifier_apply(modifier=cutter_wrap.name)
     bpy.context.view_layer.update()
 
     # 支持体平面は不要なので削除
